@@ -109,6 +109,11 @@ namespace XamlX.Parsers
                 return new XamlAstXmlTypeReference(el.AsLi(_text), ns, name);
             }
 
+            XamlAstXmlTypeReference ParseTypeName(IXamlLineInfo info, string typeName, IXmlElement xel)
+                => ParseTypeName(info, typeName,
+                    ns => string.IsNullOrWhiteSpace(ns)
+                        ? _ns[""]
+                        : _ns[ns] ?? "");
             static XamlAstXmlTypeReference ParseTypeName(IXamlLineInfo info, string typeName, XElement xel)
                 => ParseTypeName(info, typeName,
                     ns => string.IsNullOrWhiteSpace(ns)
@@ -134,6 +139,27 @@ namespace XamlX.Parsers
                 return new XamlAstXmlTypeReference(info, xmlns, name);
             }
 
+            List<XamlAstXmlTypeReference> ParseTypeArguments(string args, IXmlElement xel, IXamlLineInfo info)
+            {
+                try
+                {
+                    XamlAstXmlTypeReference Parse(CommaSeparatedParenthesesTreeParser.Node node)
+                    {
+                        var rv = ParseTypeName(info, node.Value, xel);
+
+                        if (node.Children.Count != 0)
+                            rv.GenericArguments = node.Children.Select(Parse).ToList();
+                        return rv;
+                    }
+                    var tree = CommaSeparatedParenthesesTreeParser.Parse(args);
+                    return tree.Select(Parse).ToList();
+                }
+                catch (CommaSeparatedParenthesesTreeParser.ParseException e)
+                {
+                    throw new XamlParseException(e.Message, info);
+                }
+            }
+
             static List<XamlAstXmlTypeReference> ParseTypeArguments(string args, XElement xel, IXamlLineInfo info)
             {
                 try
@@ -153,6 +179,30 @@ namespace XamlX.Parsers
                 {
                     throw new XamlParseException(e.Message, info);
                 }
+            }
+
+            IXamlAstValueNode ParseTextValueOrMarkupExtension(string ext, IXmlElement xel, IXamlLineInfo info)
+            {
+                if (ext.StartsWith("{") || ext.StartsWith(@"\{"))
+                {
+                    if (ext.StartsWith("{}"))
+                        ext = ext.Substring(2);
+                    else
+                    {
+                        try
+                        {
+
+                            return SystemXamlMarkupExtensionParser.SystemXamlMarkupExtensionParser.Parse(info, ext,
+                                t => ParseTypeName(info, t, xel));
+                        }
+                        catch (MeScannerParseException parseEx)
+                        {
+                            throw new XamlParseException(parseEx.Message, info);
+                        }
+                    }
+                }
+
+                return new XamlAstTextNode(info, ext);
             }
 
             static IXamlAstValueNode ParseTextValueOrMarkupExtension(string ext, XElement xel, IXamlLineInfo info)
@@ -226,13 +276,13 @@ namespace XamlX.Parsers
                         // Parse type arguments
                         else if (attrNs == XamlNamespaces.Xaml2006 &&
                                  attrName == "TypeArguments")
-                            type.GenericArguments = ParseTypeArguments(attribute.Value, el, attribute.AsLi(_text));
+                            type.GenericArguments = ParseTypeArguments(attribute.Value, newEl, attribute.AsLi(_text));
                         // Parse as a directive
                         else if (attrNs != "" && !attrName.Contains("."))
                             i.Children.Add(new XamlAstXmlDirective(newEl.AsLi(_text),
                                 attrNs, attrName, new[]
                                 {
-                                ParseTextValueOrMarkupExtension(attribute.Value, el, attribute.AsLi(_text))
+                                ParseTextValueOrMarkupExtension(attribute.Value, newEl, attribute.AsLi(_text))
                                 }
                             ));
                         // Parse as a property
@@ -245,13 +295,13 @@ namespace XamlX.Parsers
                             {
                                 var parts = pname.Split(new[] { '.' }, 2);
                                 pname = parts[1];
-                                var ns = attrNs == "" ? el.GetDefaultNamespace().NamespaceName : attrNs;
+                                var ns = attrNs == "" ? _ns[""] : attrNs;
                                 ptype = new XamlAstXmlTypeReference(newEl.AsLi(_text), ns, parts[0]);
                             }
 
-                            i.Children.Add(new XamlAstXamlPropertyValueNode(el.AsLi(),
-                                new XamlAstNamePropertyReference(el.AsLi(), ptype, pname, type),
-                                ParseTextValueOrMarkupExtension(attribute.Value, el, attribute.AsLi(_text))));
+                            i.Children.Add(new XamlAstXamlPropertyValueNode(newEl.AsLi(_text),
+                                new XamlAstNamePropertyReference(newEl.AsLi(_text), ptype, pname, type),
+                                ParseTextValueOrMarkupExtension(attribute.Value, newEl, attribute.AsLi(_text))));
                         }
                     }
                 }
