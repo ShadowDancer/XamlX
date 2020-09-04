@@ -18,5 +18,14 @@ namespace XamlX.Parsers
                 return (name.Substring(0, colonIndex), name.Substring(colonIndex+1));
             }
         }
+        public static (string ns, string name) GetNsFromName(string name, Dictionary<string, string> nsDict)
+        {
+            (string ns, string localName) = GetNsFromName(name);
+            if (nsDict.TryGetValue(ns, out string newVal))
+            {
+                ns = newVal;
+            }
+            return (ns, localName);
+        }
     }
 }
