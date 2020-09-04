@@ -47,6 +47,8 @@ namespace XamlX.Parsers
             var parsed = Parser.Parse(buffer);
 
             Dictionary<string, string> namespaceAliases = new Dictionary<string, string>();
+            HashSet<string> ignorableNamespaces = new HashSet<string>();
+            const string ignorableNs = "http://schemas.openxmlformats.org/markup-compatibility/2006";
             foreach (var kvp in parsed.Root.Attributes)
             {
                 (string ns, string name) = ParserUtils.GetNsFromName(kvp.Key);
@@ -59,11 +61,20 @@ namespace XamlX.Parsers
                 {
                     namespaceAliases[""] = kvp.Value;
                 }
+
+                if (name == "Ignorable" && namespaceAliases.TryGetValue(ns, out var transformedNs) && transformedNs == ignorableNs)
+                {
+                    ignorableNamespaces.Add(ns);
+                    foreach(var ignorable in kvp.Value.Split(' '))
+                    {
+                        ignorableNamespaces.Add(ignorable);
+                    }
+                }
             }
 
             var doc = new XamlDocument
             {
-                Root = new ParserContext(root, parsed.Root, data, namespaceAliases).Parse(),
+                Root = new ParserContext(root, parsed.Root, data, namespaceAliases, ignorableNamespaces).Parse(),
                 NamespaceAliases = namespaceAliases
             };
 
@@ -77,13 +88,15 @@ namespace XamlX.Parsers
             private readonly IXmlElement _newRoot;
             private readonly string _text;
             private readonly Dictionary<string, string> _ns;
+            private readonly HashSet<string> _ignorable;
 
-            public ParserContext(XElement root, IXmlElement newRoot, string text, Dictionary<string, string> namespaceAliases)
+            public ParserContext(XElement root, IXmlElement newRoot, string text, Dictionary<string, string> namespaceAliases, HashSet<string> ignorableNamespaces)
             {
                 _root = root;
                 _newRoot = newRoot;
                 this._text = text;
                 this._ns = namespaceAliases;
+                this._ignorable = ignorableNamespaces;
             }
 
 
@@ -170,7 +183,6 @@ namespace XamlX.Parsers
             {
                 XamlAstXmlTypeReference type;
                 XamlAstObjectNode i;
-                bool isEmptyElement = newEl is XmlEmptyElementSyntax;
                 if (newEl != null)
                 {
                     (string _, string nodeName) = ParserUtils.GetNsFromName(newEl.Name);
@@ -187,49 +199,107 @@ namespace XamlX.Parsers
                     type = GetTypeReference(el);
                     i = new XamlAstObjectNode(el.AsLi(), type);
                 }
-                
-                foreach (var attr in el.Attributes())
+
+                if (newEl != null)
                 {
-                    if (attr.Name.NamespaceName == "http://www.w3.org/2000/xmlns/" ||
-                        (attr.Name.NamespaceName == "" && attr.Name.LocalName == "xmlns"))
-                    {
-                        if (!root)
-                            throw ParseError(attr.AsLi(),
-                                "xmlns declarations are only allowed on the root element to preserve memory");
-                    }
-                    else if (attr.Name.NamespaceName.StartsWith("http://www.w3.org"))
-                    {
-                        // Silently ignore all xml-parser related attributes
-                    }
-                    // Parse type arguments
-                    else if (attr.Name.NamespaceName == XamlNamespaces.Xaml2006 &&
-                             attr.Name.LocalName == "TypeArguments")
-                        type.GenericArguments = ParseTypeArguments(attr.Value, el, attr.AsLi());
-                    // Parse as a directive
-                    else if (attr.Name.NamespaceName != "" && !attr.Name.LocalName.Contains("."))
-                        i.Children.Add(new XamlAstXmlDirective(el.AsLi(),
-                            attr.Name.NamespaceName, attr.Name.LocalName, new[]
-                            {
-                                ParseTextValueOrMarkupExtension(attr.Value, el, attr.AsLi())
-                            }
-                        ));
-                    // Parse as a property
-                    else
-                    {
-                        var pname = attr.Name.LocalName;
-                        var ptype = i.Type;
 
-                        if (pname.Contains("."))
+                    foreach (XmlAttributeSyntax attribute in newEl.AsSyntaxElement.Attributes)
+                    {
+
+                        (string attrNs, string attrName) = ParserUtils.GetNsFromName(attribute.Name);
+                        if (_ignorable.Contains(attrNs))
                         {
-                            var parts = pname.Split(new[] { '.' }, 2);
-                            pname = parts[1];
-                            var ns = attr.Name.Namespace == "" ? el.GetDefaultNamespace().NamespaceName : attr.Name.NamespaceName;
-                            ptype = new XamlAstXmlTypeReference(el.AsLi(), ns, parts[0]);
+                            continue;
                         }
+                        if (attrNs == "http://www.w3.org/2000/xmlns/" || attrNs == "xmlns" || 
+                            (attrNs == "" && attrName == "xmlns"))
+                        {
 
-                        i.Children.Add(new XamlAstXamlPropertyValueNode(el.AsLi(),
-                            new XamlAstNamePropertyReference(el.AsLi(), ptype, pname, type),
-                            ParseTextValueOrMarkupExtension(attr.Value, el, attr.AsLi())));
+                            if (!root)
+                                throw ParseError(attribute.AsLi(_text),
+                                    "xmlns declarations are only allowed on the root element to preserve memory");
+                        }
+                        else if (attrNs.StartsWith("http://www.w3.org"))
+                        {
+                            // Silently ignore all xml-parser related attributes
+                        }
+                        // Parse type arguments
+                        else if (attrNs == XamlNamespaces.Xaml2006 &&
+                                 attrName == "TypeArguments")
+                            type.GenericArguments = ParseTypeArguments(attribute.Value, el, attribute.AsLi(_text));
+                        // Parse as a directive
+                        else if (attrNs != "" && !attrName.Contains("."))
+                            i.Children.Add(new XamlAstXmlDirective(newEl.AsLi(_text),
+                                attrNs, attrName, new[]
+                                {
+                                ParseTextValueOrMarkupExtension(attribute.Value, el, attribute.AsLi(_text))
+                                }
+                            ));
+                        // Parse as a property
+                        else
+                        {
+                            var pname = attrName;
+                            var ptype = i.Type;
+
+                            if (pname.Contains("."))
+                            {
+                                var parts = pname.Split(new[] { '.' }, 2);
+                                pname = parts[1];
+                                var ns = attrNs == "" ? el.GetDefaultNamespace().NamespaceName : attrNs;
+                                ptype = new XamlAstXmlTypeReference(newEl.AsLi(_text), ns, parts[0]);
+                            }
+
+                            i.Children.Add(new XamlAstXamlPropertyValueNode(el.AsLi(),
+                                new XamlAstNamePropertyReference(el.AsLi(), ptype, pname, type),
+                                ParseTextValueOrMarkupExtension(attribute.Value, el, attribute.AsLi(_text))));
+                        }
+                    }
+                }
+                else
+                {
+                    foreach (var attr in el.Attributes())
+                    {
+                        if (attr.Name.NamespaceName == "http://www.w3.org/2000/xmlns/" ||
+                            (attr.Name.NamespaceName == "" && attr.Name.LocalName == "xmlns"))
+                        {
+                            if (!root)
+                                throw ParseError(attr.AsLi(),
+                                    "xmlns declarations are only allowed on the root element to preserve memory");
+                        }
+                        else if (attr.Name.NamespaceName.StartsWith("http://www.w3.org"))
+                        {
+                            // Silently ignore all xml-parser related attributes
+                        }
+                        // Parse type arguments
+                        else if (attr.Name.NamespaceName == XamlNamespaces.Xaml2006 &&
+                                 attr.Name.LocalName == "TypeArguments")
+                            type.GenericArguments = ParseTypeArguments(attr.Value, el, attr.AsLi());
+                        // Parse as a directive
+                        else if (attr.Name.NamespaceName != "" && !attr.Name.LocalName.Contains("."))
+                            i.Children.Add(new XamlAstXmlDirective(el.AsLi(),
+                                attr.Name.NamespaceName, attr.Name.LocalName, new[]
+                                {
+                                ParseTextValueOrMarkupExtension(attr.Value, el, attr.AsLi())
+                                }
+                            ));
+                        // Parse as a property
+                        else
+                        {
+                            var pname = attr.Name.LocalName;
+                            var ptype = i.Type;
+
+                            if (pname.Contains("."))
+                            {
+                                var parts = pname.Split(new[] { '.' }, 2);
+                                pname = parts[1];
+                                var ns = attr.Name.Namespace == "" ? el.GetDefaultNamespace().NamespaceName : attr.Name.NamespaceName;
+                                ptype = new XamlAstXmlTypeReference(el.AsLi(), ns, parts[0]);
+                            }
+
+                            i.Children.Add(new XamlAstXamlPropertyValueNode(el.AsLi(),
+                                new XamlAstNamePropertyReference(el.AsLi(), ptype, pname, type),
+                                ParseTextValueOrMarkupExtension(attr.Value, el, attr.AsLi())));
+                        }
                     }
                 }
 
@@ -334,7 +404,7 @@ namespace XamlX.Parsers
         }
         public static IXamlLineInfo AsLi(this IXmlElement info, string data)
         {
-            var pos = Utils.OffsetToPosition(((XmlNodeSyntax)info).SpanStart+1, data);
+            var pos = Utils.OffsetToPosition(((XmlNodeSyntax)info).SpanStart + 1, data);
             return new WrappedLineInfo(pos.Line, pos.Character);
         }
     }
