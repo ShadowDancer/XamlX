@@ -37,32 +37,49 @@ namespace XamlX.Parsers
             Dictionary<string, string> namespaceAliases = new Dictionary<string, string>();
             HashSet<string> ignorableNamespaces = new HashSet<string>();
             const string ignorableNs = "http://schemas.openxmlformats.org/markup-compatibility/2006";
-            foreach (var kvp in parsed.Root.Attributes)
+            ignorableNamespaces.Add(ignorableNs);
+            var attributes = parsed.Root.Attributes
+                .Select(n =>
+                {
+                    var pn = XmlNamespaces.GetPrefixFromName(n.Key);
+                    return (pn.prefix, pn.name, n.Value);
+                    
+                })
+                .ToList();
+            foreach (var attr in attributes)
             {
-                (string ns, string name) = ParserUtils.GetNsFromName(kvp.Key);
-                if (ns == "xmlns")
+                if (attr.prefix == "xmlns")
                 {
-                    namespaceAliases[name] = kvp.Value;
+                    namespaceAliases[attr.name] = attr.Value;
                 }
 
-                if (ns == "" && name == "xmlns")
+                if (attr.prefix == "" && attr.name == "xmlns")
                 {
-                    namespaceAliases[""] = kvp.Value;
+                    namespaceAliases[""] = attr.Value;
                 }
+            }
 
-                if (name == "Ignorable" && namespaceAliases.TryGetValue(ns, out var transformedNs) && transformedNs == ignorableNs)
+            foreach (var attr in attributes)
+            {
+                if (attr.name == "Ignorable" && namespaceAliases.TryGetValue(attr.prefix, out var transformedNs) && transformedNs == ignorableNs)
                 {
-                    ignorableNamespaces.Add(ns);
-                    foreach (var ignorable in kvp.Value.Split(' '))
+                    foreach (var ignorable in attr.Value.Split(' '))
                     {
-                        ignorableNamespaces.Add(ignorable);
+                        ignorableNamespaces.Add(namespaceAliases[ignorable]);
                     }
                 }
             }
 
+            if(compatibilityMappings == null)
+            {
+                compatibilityMappings = new Dictionary<string, string>();
+            }
+
+
+            XmlNamespaces ns = new XmlNamespaces(namespaceAliases, ignorableNamespaces, compatibilityMappings);
             var doc = new XamlDocument
             {
-                Root = new ParserContext(parsed.Root, data, namespaceAliases, ignorableNamespaces).Parse(),
+                Root = new ParserContext(parsed.Root, data, ns).Parse(),
                 NamespaceAliases = namespaceAliases
             };
 
@@ -74,28 +91,26 @@ namespace XamlX.Parsers
         {
             private readonly IXmlElement _newRoot;
             private readonly string _text;
-            private readonly Dictionary<string, string> _ns;
-            private readonly HashSet<string> _ignorable;
+            private readonly XmlNamespaces _ns;
 
-            public ParserContext(IXmlElement newRoot, string text, Dictionary<string, string> namespaceAliases, HashSet<string> ignorableNamespaces)
+            public ParserContext(IXmlElement newRoot, string text, XmlNamespaces ns)
             {
                 _newRoot = newRoot;
-                this._text = text;
-                this._ns = namespaceAliases;
-                this._ignorable = ignorableNamespaces;
+                _text = text;
+                _ns = ns;
             }
 
             XamlAstXmlTypeReference GetTypeReference(IXmlElement el)
             {
-                (string ns, string name) = ParserUtils.GetNsFromName(el.Name, _ns);
+                (string ns, _, string name) = _ns.GetNsFromName(el.Name);
                 return new XamlAstXmlTypeReference(el.AsLi(_text), ns, name);
             }
 
-            XamlAstXmlTypeReference ParseTypeName(IXamlLineInfo info, string typeName, IXmlElement xel)
+            XamlAstXmlTypeReference ParseTypeName(IXamlLineInfo info, string typeName)
                 => ParseTypeName(info, typeName,
                     ns => string.IsNullOrWhiteSpace(ns)
-                        ? _ns[""]
-                        : _ns[ns] ?? "");
+                        ? _ns.DefaultNamespace
+                        : _ns.NsForPrefix(ns) ?? "");
 
             static XamlAstXmlTypeReference ParseTypeName(IXamlLineInfo info, string typeName, Func<string, string> prefixResolver)
             {
@@ -122,7 +137,7 @@ namespace XamlX.Parsers
                 {
                     XamlAstXmlTypeReference Parse(CommaSeparatedParenthesesTreeParser.Node node)
                     {
-                        var rv = ParseTypeName(info, node.Value, xel);
+                        var rv = ParseTypeName(info, node.Value);
 
                         if (node.Children.Count != 0)
                             rv.GenericArguments = node.Children.Select(Parse).ToList();
@@ -137,7 +152,7 @@ namespace XamlX.Parsers
                 }
             }
 
-            IXamlAstValueNode ParseTextValueOrMarkupExtension(string ext, IXmlElement xel, IXamlLineInfo info)
+            IXamlAstValueNode ParseTextValueOrMarkupExtension(string ext, IXamlLineInfo info)
             {
                 if (ext.StartsWith("{") || ext.StartsWith(@"\{"))
                 {
@@ -147,9 +162,8 @@ namespace XamlX.Parsers
                     {
                         try
                         {
-
                             return SystemXamlMarkupExtensionParser.SystemXamlMarkupExtensionParser.Parse(info, ext,
-                                t => ParseTypeName(info, t, xel));
+                                t => ParseTypeName(info, t));
                         }
                         catch (MeScannerParseException parseEx)
                         {
@@ -166,7 +180,7 @@ namespace XamlX.Parsers
                 XamlAstXmlTypeReference type;
                 XamlAstObjectNode i;
 
-                (string _, string elementName) = ParserUtils.GetNsFromName(newEl.Name);
+                (string _, string elementName) = XmlNamespaces.GetPrefixFromName(newEl.Name);
 
                 if (elementName.Contains("."))
                     throw ParseError(newEl.AsLi(_text), "Dots aren't allowed in type names");
@@ -175,14 +189,13 @@ namespace XamlX.Parsers
 
                 foreach (XmlAttributeSyntax attribute in newEl.AsSyntaxElement.Attributes)
                 {
-
-                    (string attrNs, string attrName) = ParserUtils.GetNsFromName(attribute.Name);
-                    if (_ignorable.Contains(attrNs))
+                    (string attrNs, string attrPrefix, string attrName) = _ns.GetNsFromName(attribute.Name);
+                    if (_ns.IsIgnorable(attrNs))
                     {
                         continue;
                     }
-                    if (attrNs == "http://www.w3.org/2000/xmlns/" || attrNs == "xmlns" ||
-                        (attrNs == "" && attrName == "xmlns"))
+                    if (attrNs == "http://www.w3.org/2000/xmlns/" || attrPrefix == "xmlns" ||
+                        (attrPrefix == "" && attrName == "xmlns"))
                     {
 
                         if (!root)
@@ -194,15 +207,15 @@ namespace XamlX.Parsers
                         // Silently ignore all xml-parser related attributes
                     }
                     // Parse type arguments
-                    else if (_ns[attrNs] == XamlNamespaces.Xaml2006 &&
+                    else if (attrNs == XamlNamespaces.Xaml2006 &&
                                 attrName == "TypeArguments")
                         type.GenericArguments = ParseTypeArguments(attribute.Value, newEl, attribute.AsLi(_text));
                     // Parse as a directive
-                    else if (attrNs != "" && !attrName.Contains("."))
+                    else if (attrPrefix != "" && !attrName.Contains("."))
                         i.Children.Add(new XamlAstXmlDirective(newEl.AsLi(_text),
-                            _ns[attrNs], attrName, new[]
+                            attrNs, attrName, new[]
                             {
-                            ParseTextValueOrMarkupExtension(attribute.Value, newEl, attribute.AsLi(_text))
+                            ParseTextValueOrMarkupExtension(attribute.Value, attribute.AsLi(_text))
                             }
                         ));
                     // Parse as a property
@@ -215,20 +228,20 @@ namespace XamlX.Parsers
                         {
                             var parts = pname.Split(new[] { '.' }, 2);
                             pname = parts[1];
-                            var ns = attrNs == "" ? _ns[""] : _ns[attrNs];
+                            var ns = attrPrefix == "" ? _ns.DefaultNamespace : attrNs;
                             ptype = new XamlAstXmlTypeReference(newEl.AsLi(_text), ns, parts[0]);
                         }
 
                         i.Children.Add(new XamlAstXamlPropertyValueNode(newEl.AsLi(_text),
                             new XamlAstNamePropertyReference(newEl.AsLi(_text), ptype, pname, type),
-                            ParseTextValueOrMarkupExtension(attribute.Value, newEl, attribute.AsLi(_text))));
+                            ParseTextValueOrMarkupExtension(attribute.Value, attribute.AsLi(_text))));
                     }
                 }
 
                 foreach (var newNode in newEl.Elements)
                 {
-                    (string nodeNs, string nodeName) = ParserUtils.GetNsFromName(newNode.Name);
-                    if (_ignorable.Contains(nodeNs))
+                    (string nodeNs, string nodePrefix, string nodeName) = _ns.GetNsFromName(newNode.Name);
+                    if (_ns.IsIgnorable(nodeNs))
                     {
                         continue;
                     }
@@ -241,7 +254,7 @@ namespace XamlX.Parsers
                         i.Children.Add(new XamlAstXamlPropertyValueNode(newEl.AsLi(_text), new XamlAstNamePropertyReference
                             (
                                 newEl.AsLi(_text),
-                                new XamlAstXmlTypeReference(newEl.AsLi(_text), _ns[nodeNs],
+                                new XamlAstXmlTypeReference(newEl.AsLi(_text), nodeNs,
                                     pair[0]), pair[1], type
                             ),
                             ParseValueNodeChildren(newNode)
@@ -249,9 +262,7 @@ namespace XamlX.Parsers
                     }
                     else
                     {
-                        var parsed = ParseValueNode(newNode);
-                        if (parsed != null)
-                            i.Children.Add(parsed);
+                        i.Children.Add(ParseNewInstance(newNode, false));
                     }
 
                 }
@@ -263,18 +274,6 @@ namespace XamlX.Parsers
                 }
 
                 return i;
-            }
-
-            IXamlAstValueNode ParseValueNode(IXmlElement newNode)
-            {
-                if(newNode.AsSyntaxElement.Content.Count == 1 && newNode.AsSyntaxElement.Content[0] is XmlTextSyntax textContent)
-                {
-                    return new XamlAstTextNode(newNode.AsLi(_text), textContent.Value.Trim());
-                }
-                else
-                {
-                    return ParseNewInstance(newNode, false);
-                }
             }
 
             List<IXamlAstValueNode> ParseValueNodeChildren(IXmlElement newParent)
@@ -289,9 +288,7 @@ namespace XamlX.Parsers
                 {
                     foreach (var newNode in newParent.Elements)
                     {
-                        var parsed = ParseValueNode(newNode);
-                        if (parsed != null)
-                            lst.Add(parsed);
+                        lst.Add(ParseNewInstance(newNode, false));
                     }
                 }
                 return lst;

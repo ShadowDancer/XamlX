@@ -11,14 +11,14 @@ namespace XamlParserTests
         [Fact]
         public void LocalNameOnly()
         {
-            Assert.Equal(("", "test"), ParserUtils.GetNsFromName("test"));
+            Assert.Equal(("", "test"), XmlNamespaces.GetPrefixFromName("test"));
         }
 
         [Theory]
         [InlineData("xmlns", "test", "xmlns:test")]
         public void NameWithNamespace(string ns, string localName, string input)
         {
-            Assert.Equal((ns, localName), ParserUtils.GetNsFromName(input));
+            Assert.Equal((ns, localName), XmlNamespaces.GetPrefixFromName(input));
         }
 
         [Theory]
@@ -28,7 +28,7 @@ namespace XamlParserTests
         [InlineData("xmlns", "", "xmlns:")]
         public void EmptyData(string ns, string localName, string input)
         {
-            Assert.Equal((ns, localName), ParserUtils.GetNsFromName(input));
+            Assert.Equal((ns, localName), XmlNamespaces.GetPrefixFromName(input));
         }
     }
 }
