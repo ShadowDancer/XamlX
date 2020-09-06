@@ -233,123 +233,63 @@ namespace XamlX.Parsers
             {
                 XamlAstXmlTypeReference type;
                 XamlAstObjectNode i;
-                if (newEl != null)
-                {
-                    (string _, string nodeName) = ParserUtils.GetNsFromName(newEl.Name);
 
-                    if (nodeName.Contains("."))
-                        throw ParseError(newEl.AsLi(_text), "Dots aren't allowed in type names");
-                    type = GetTypeReference(newEl);
-                    i = new XamlAstObjectNode(newEl.AsLi(_text), type);
-                }
-                else
-                {
-                    if (el.Name.LocalName.Contains("."))
-                        throw ParseError(el.AsLi(), "Dots aren't allowed in type names");
-                    type = GetTypeReference(el);
-                    i = new XamlAstObjectNode(el.AsLi(), type);
-                }
+                (string _, string elementName) = ParserUtils.GetNsFromName(newEl.Name);
 
-                if (newEl != null)
+                if (elementName.Contains("."))
+                    throw ParseError(newEl.AsLi(_text), "Dots aren't allowed in type names");
+                type = GetTypeReference(newEl);
+                i = new XamlAstObjectNode(newEl.AsLi(_text), type);
+
+                foreach (XmlAttributeSyntax attribute in newEl.AsSyntaxElement.Attributes)
                 {
 
-                    foreach (XmlAttributeSyntax attribute in newEl.AsSyntaxElement.Attributes)
+                    (string attrNs, string attrName) = ParserUtils.GetNsFromName(attribute.Name);
+                    if (_ignorable.Contains(attrNs))
                     {
-
-                        (string attrNs, string attrName) = ParserUtils.GetNsFromName(attribute.Name);
-                        if (_ignorable.Contains(attrNs))
-                        {
-                            continue;
-                        }
-                        if (attrNs == "http://www.w3.org/2000/xmlns/" || attrNs == "xmlns" ||
-                            (attrNs == "" && attrName == "xmlns"))
-                        {
-
-                            if (!root)
-                                throw ParseError(attribute.AsLi(_text),
-                                    "xmlns declarations are only allowed on the root element to preserve memory");
-                        }
-                        else if (attrNs.StartsWith("http://www.w3.org"))
-                        {
-                            // Silently ignore all xml-parser related attributes
-                        }
-                        // Parse type arguments
-                        else if (_ns[attrNs] == XamlNamespaces.Xaml2006 &&
-                                 attrName == "TypeArguments")
-                            type.GenericArguments = ParseTypeArguments(attribute.Value, newEl, attribute.AsLi(_text));
-                        // Parse as a directive
-                        else if (attrNs != "" && !attrName.Contains("."))
-                            i.Children.Add(new XamlAstXmlDirective(newEl.AsLi(_text),
-                                _ns[attrNs], attrName, new[]
-                                {
-                                ParseTextValueOrMarkupExtension(attribute.Value, newEl, attribute.AsLi(_text))
-                                }
-                            ));
-                        // Parse as a property
-                        else
-                        {
-                            var pname = attrName;
-                            var ptype = i.Type;
-
-                            if (pname.Contains("."))
-                            {
-                                var parts = pname.Split(new[] { '.' }, 2);
-                                pname = parts[1];
-                                var ns = attrNs == "" ? _ns[""] : _ns[attrNs];
-                                ptype = new XamlAstXmlTypeReference(newEl.AsLi(_text), ns, parts[0]);
-                            }
-
-                            i.Children.Add(new XamlAstXamlPropertyValueNode(newEl.AsLi(_text),
-                                new XamlAstNamePropertyReference(newEl.AsLi(_text), ptype, pname, type),
-                                ParseTextValueOrMarkupExtension(attribute.Value, newEl, attribute.AsLi(_text))));
-                        }
+                        continue;
                     }
-                }
-                else
-                {
-                    foreach (var attr in el.Attributes())
+                    if (attrNs == "http://www.w3.org/2000/xmlns/" || attrNs == "xmlns" ||
+                        (attrNs == "" && attrName == "xmlns"))
                     {
-                        if (attr.Name.NamespaceName == "http://www.w3.org/2000/xmlns/" ||
-                            (attr.Name.NamespaceName == "" && attr.Name.LocalName == "xmlns"))
-                        {
-                            if (!root)
-                                throw ParseError(attr.AsLi(),
-                                    "xmlns declarations are only allowed on the root element to preserve memory");
-                        }
-                        else if (attr.Name.NamespaceName.StartsWith("http://www.w3.org"))
-                        {
-                            // Silently ignore all xml-parser related attributes
-                        }
-                        // Parse type arguments
-                        else if (attr.Name.NamespaceName == XamlNamespaces.Xaml2006 &&
-                                 attr.Name.LocalName == "TypeArguments")
-                            type.GenericArguments = ParseTypeArguments(attr.Value, el, attr.AsLi());
-                        // Parse as a directive
-                        else if (attr.Name.NamespaceName != "" && !attr.Name.LocalName.Contains("."))
-                            i.Children.Add(new XamlAstXmlDirective(el.AsLi(),
-                                attr.Name.NamespaceName, attr.Name.LocalName, new[]
-                                {
-                                ParseTextValueOrMarkupExtension(attr.Value, el, attr.AsLi())
-                                }
-                            ));
-                        // Parse as a property
-                        else
-                        {
-                            var pname = attr.Name.LocalName;
-                            var ptype = i.Type;
 
-                            if (pname.Contains("."))
+                        if (!root)
+                            throw ParseError(attribute.AsLi(_text),
+                                "xmlns declarations are only allowed on the root element to preserve memory");
+                    }
+                    else if (attrNs.StartsWith("http://www.w3.org"))
+                    {
+                        // Silently ignore all xml-parser related attributes
+                    }
+                    // Parse type arguments
+                    else if (_ns[attrNs] == XamlNamespaces.Xaml2006 &&
+                                attrName == "TypeArguments")
+                        type.GenericArguments = ParseTypeArguments(attribute.Value, newEl, attribute.AsLi(_text));
+                    // Parse as a directive
+                    else if (attrNs != "" && !attrName.Contains("."))
+                        i.Children.Add(new XamlAstXmlDirective(newEl.AsLi(_text),
+                            _ns[attrNs], attrName, new[]
                             {
-                                var parts = pname.Split(new[] { '.' }, 2);
-                                pname = parts[1];
-                                var ns = attr.Name.Namespace == "" ? el.GetDefaultNamespace().NamespaceName : attr.Name.NamespaceName;
-                                ptype = new XamlAstXmlTypeReference(el.AsLi(), ns, parts[0]);
+                            ParseTextValueOrMarkupExtension(attribute.Value, newEl, attribute.AsLi(_text))
                             }
+                        ));
+                    // Parse as a property
+                    else
+                    {
+                        var pname = attrName;
+                        var ptype = i.Type;
 
-                            i.Children.Add(new XamlAstXamlPropertyValueNode(el.AsLi(),
-                                new XamlAstNamePropertyReference(el.AsLi(), ptype, pname, type),
-                                ParseTextValueOrMarkupExtension(attr.Value, el, attr.AsLi())));
+                        if (pname.Contains("."))
+                        {
+                            var parts = pname.Split(new[] { '.' }, 2);
+                            pname = parts[1];
+                            var ns = attrNs == "" ? _ns[""] : _ns[attrNs];
+                            ptype = new XamlAstXmlTypeReference(newEl.AsLi(_text), ns, parts[0]);
                         }
+
+                        i.Children.Add(new XamlAstXamlPropertyValueNode(newEl.AsLi(_text),
+                            new XamlAstNamePropertyReference(newEl.AsLi(_text), ptype, pname, type),
+                            ParseTextValueOrMarkupExtension(attribute.Value, newEl, attribute.AsLi(_text))));
                     }
                 }
 
