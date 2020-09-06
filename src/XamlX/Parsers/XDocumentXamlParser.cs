@@ -1,12 +1,9 @@
 ﻿using Microsoft.Language.Xml;
 using PimpMyAvalonia.LanguageServer;
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Xml;
-using System.Xml.Linq;
 using XamlX.Ast;
 using XamlX.Parsers.SystemXamlMarkupExtensionParser;
 
@@ -34,15 +31,6 @@ namespace XamlX.Parsers
         public static XamlDocument Parse(TextReader reader, Dictionary<string, string> compatibilityMappings = null)
         {
             string data = reader.ReadToEnd();
-            XmlReader xr = XmlReader.Create(new StringReader(data), new XmlReaderSettings
-            {
-                IgnoreWhitespace = true,
-                DtdProcessing = DtdProcessing.Ignore
-            });
-            xr = new CompatibleXmlReader(xr, compatibilityMappings ?? new Dictionary<string, string>());
-
-            var root = XDocument.Load(xr, LoadOptions.SetLineInfo).Root;
-
             var buffer = new StringBuffer(data);
             var parsed = Parser.Parse(buffer);
 
@@ -74,7 +62,7 @@ namespace XamlX.Parsers
 
             var doc = new XamlDocument
             {
-                Root = new ParserContext(root, parsed.Root, data, namespaceAliases, ignorableNamespaces).Parse(),
+                Root = new ParserContext(parsed.Root, data, namespaceAliases, ignorableNamespaces).Parse(),
                 NamespaceAliases = namespaceAliases
             };
 
@@ -84,24 +72,18 @@ namespace XamlX.Parsers
 
         class ParserContext
         {
-            private readonly XElement _root;
             private readonly IXmlElement _newRoot;
             private readonly string _text;
             private readonly Dictionary<string, string> _ns;
             private readonly HashSet<string> _ignorable;
 
-            public ParserContext(XElement root, IXmlElement newRoot, string text, Dictionary<string, string> namespaceAliases, HashSet<string> ignorableNamespaces)
+            public ParserContext(IXmlElement newRoot, string text, Dictionary<string, string> namespaceAliases, HashSet<string> ignorableNamespaces)
             {
-                _root = root;
                 _newRoot = newRoot;
                 this._text = text;
                 this._ns = namespaceAliases;
                 this._ignorable = ignorableNamespaces;
             }
-
-
-            XamlAstXmlTypeReference GetTypeReference(XElement el) =>
-                new XamlAstXmlTypeReference(el.AsLi(), el.Name.NamespaceName, el.Name.LocalName);
 
             XamlAstXmlTypeReference GetTypeReference(IXmlElement el)
             {
@@ -114,11 +96,6 @@ namespace XamlX.Parsers
                     ns => string.IsNullOrWhiteSpace(ns)
                         ? _ns[""]
                         : _ns[ns] ?? "");
-            static XamlAstXmlTypeReference ParseTypeName(IXamlLineInfo info, string typeName, XElement xel)
-                => ParseTypeName(info, typeName,
-                    ns => string.IsNullOrWhiteSpace(ns)
-                        ? xel.GetDefaultNamespace().NamespaceName
-                        : xel.GetNamespaceOfPrefix(ns)?.NamespaceName ?? "");
 
             static XamlAstXmlTypeReference ParseTypeName(IXamlLineInfo info, string typeName, Func<string, string> prefixResolver)
             {
@@ -140,27 +117,6 @@ namespace XamlX.Parsers
             }
 
             List<XamlAstXmlTypeReference> ParseTypeArguments(string args, IXmlElement xel, IXamlLineInfo info)
-            {
-                try
-                {
-                    XamlAstXmlTypeReference Parse(CommaSeparatedParenthesesTreeParser.Node node)
-                    {
-                        var rv = ParseTypeName(info, node.Value, xel);
-
-                        if (node.Children.Count != 0)
-                            rv.GenericArguments = node.Children.Select(Parse).ToList();
-                        return rv;
-                    }
-                    var tree = CommaSeparatedParenthesesTreeParser.Parse(args);
-                    return tree.Select(Parse).ToList();
-                }
-                catch (CommaSeparatedParenthesesTreeParser.ParseException e)
-                {
-                    throw new XamlParseException(e.Message, info);
-                }
-            }
-
-            static List<XamlAstXmlTypeReference> ParseTypeArguments(string args, XElement xel, IXamlLineInfo info)
             {
                 try
                 {
@@ -205,31 +161,7 @@ namespace XamlX.Parsers
                 return new XamlAstTextNode(info, ext);
             }
 
-            static IXamlAstValueNode ParseTextValueOrMarkupExtension(string ext, XElement xel, IXamlLineInfo info)
-            {
-                if (ext.StartsWith("{") || ext.StartsWith(@"\{"))
-                {
-                    if (ext.StartsWith("{}"))
-                        ext = ext.Substring(2);
-                    else
-                    {
-                        try
-                        {
-
-                            return SystemXamlMarkupExtensionParser.SystemXamlMarkupExtensionParser.Parse(info, ext,
-                                t => ParseTypeName(info, t, xel));
-                        }
-                        catch (MeScannerParseException parseEx)
-                        {
-                            throw new XamlParseException(parseEx.Message, info);
-                        }
-                    }
-                }
-
-                return new XamlAstTextNode(info, ext);
-            }
-
-            XamlAstObjectNode ParseNewInstance(XElement el, IXmlElement newEl, bool root)
+            XamlAstObjectNode ParseNewInstance(IXmlElement newEl, bool root)
             {
                 XamlAstXmlTypeReference type;
                 XamlAstObjectNode i;
@@ -293,105 +225,59 @@ namespace XamlX.Parsers
                     }
                 }
 
-                if (newEl != null)
+                foreach (var newNode in newEl.Elements)
                 {
-
-                    foreach (var zip in el.Nodes().Zip(newEl.Elements, (a, b) => (a, b)))
+                    (string nodeNs, string nodeName) = ParserUtils.GetNsFromName(newNode.Name);
+                    if (_ignorable.Contains(nodeNs))
                     {
-                        (var node, var newNode) = zip;
-                        (string nodeNs, string nodeName) = ParserUtils.GetNsFromName(newNode.Name, _ns);
-                        if (nodeName.Contains("."))
-                        {
-                            if (newNode.Attributes.Any())
-                                throw ParseError(newNode.AsLi(_text), "Attributes aren't allowed on element properties");
-                            var pair = nodeName.Split(new[] { '.' }, 2);
-                            i.Children.Add(new XamlAstXamlPropertyValueNode(newEl.AsLi(_text), new XamlAstNamePropertyReference
-                                (
-                                    newEl.AsLi(_text),
-                                    new XamlAstXmlTypeReference(newEl.AsLi(_text), nodeNs,
-                                        pair[0]), pair[1], type
-                                ),
-                                ParseValueNodeChildren((XElement)node, newNode)
-                            ));
-                        }
-                        else
-                        {
-                            var parsed = ParseValueNode(node, newNode);
-                            if (parsed != null)
-                                i.Children.Add(parsed);
-                        }
-
+                        continue;
                     }
 
-                    SyntaxList<SyntaxNode> syntaxContent = newEl.AsSyntaxElement.Content;
-                    if (syntaxContent.Count == 1 && syntaxContent[0] is XmlTextSyntax textContent)
+                   if (nodeName.Contains("."))
                     {
-                        i.Children.Add(new XamlAstTextNode(textContent.AsLi(_text), textContent.Value.Trim()));
+                        if (newNode.Attributes.Any())
+                            throw ParseError(newNode.AsLi(_text), "Attributes aren't allowed on element properties");
+                        var pair = nodeName.Split(new[] { '.' }, 2);
+                        i.Children.Add(new XamlAstXamlPropertyValueNode(newEl.AsLi(_text), new XamlAstNamePropertyReference
+                            (
+                                newEl.AsLi(_text),
+                                new XamlAstXmlTypeReference(newEl.AsLi(_text), _ns[nodeNs],
+                                    pair[0]), pair[1], type
+                            ),
+                            ParseValueNodeChildren(newNode)
+                        ));
                     }
+                    else
+                    {
+                        var parsed = ParseValueNode(newNode);
+                        if (parsed != null)
+                            i.Children.Add(parsed);
+                    }
+
                 }
-                else
+
+                SyntaxList<SyntaxNode> syntaxContent = newEl.AsSyntaxElement.Content;
+                if (syntaxContent.Count == 1 && syntaxContent[0] is XmlTextSyntax textContent)
                 {
-                    foreach (var node in el.Nodes())
-                    {
-                        if (node is XElement elementNode && elementNode.Name.LocalName.Contains("."))
-                        {
-                            if (elementNode.HasAttributes)
-                                throw ParseError(node.AsLi(), "Attributes aren't allowed on element properties");
-                            var pair = elementNode.Name.LocalName.Split(new[] { '.' }, 2);
-                            i.Children.Add(new XamlAstXamlPropertyValueNode(el.AsLi(), new XamlAstNamePropertyReference
-                                (
-                                    el.AsLi(),
-                                    new XamlAstXmlTypeReference(el.AsLi(), elementNode.Name.NamespaceName,
-                                        pair[0]), pair[1], type
-                                ),
-                                ParseValueNodeChildren(elementNode, null)
-                            ));
-                        }
-                        else
-                        {
-                            if (node is XText text)
-                                i.Children.Add(new XamlAstTextNode(node.AsLi(), text.Value.Trim()));
-                            else
-                            {
-                                var parsed = ParseValueNode(node, null);
-                                if (parsed != null)
-                                    i.Children.Add(parsed);
-                            }
-
-                        }
-
-                    }
+                    i.Children.Add(new XamlAstTextNode(textContent.AsLi(_text), textContent.Value.Trim()));
                 }
 
                 return i;
             }
 
-            IXamlAstValueNode ParseValueNode(XNode node, IXmlElement newNode)
+            IXamlAstValueNode ParseValueNode(IXmlElement newNode)
             {
-                if (newNode != null)
+                if(newNode.AsSyntaxElement.Content.Count == 1 && newNode.AsSyntaxElement.Content[0] is XmlTextSyntax textContent)
                 {
-                    if(newNode.AsSyntaxElement.Content.Count == 1 && newNode.AsSyntaxElement.Content[0] is XmlTextSyntax textContent)
-                    {
-                        return new XamlAstTextNode(newNode.AsLi(_text), textContent.Value.Trim());
-                    }
-                    else
-                    {
-                        return ParseNewInstance((XElement)node, newNode, false);
-                    }
+                    return new XamlAstTextNode(newNode.AsLi(_text), textContent.Value.Trim());
                 }
-                else if(node != null)
+                else
                 {
-                    if (node is XElement el)
-                        return ParseNewInstance(el, newNode, false);
-                    if (node is XText text)
-                        return new XamlAstTextNode(node.AsLi(), text.Value.Trim());
+                    return ParseNewInstance(newNode, false);
                 }
-
-                
-                return null;
             }
 
-            List<IXamlAstValueNode> ParseValueNodeChildren(XElement parent, IXmlElement newParent)
+            List<IXamlAstValueNode> ParseValueNodeChildren(IXmlElement newParent)
             {
                 var lst = new List<IXamlAstValueNode>();
 
@@ -401,10 +287,9 @@ namespace XamlX.Parsers
                 }
                 else
                 {
-                    foreach (var zip in parent.Nodes().Zip(newParent.Elements, (a, b) => (a, b)))
+                    foreach (var newNode in newParent.Elements)
                     {
-                        (var node, var newNode) = zip;
-                        var parsed = ParseValueNode(node, newNode);
+                        var parsed = ParseValueNode(newNode);
                         if (parsed != null)
                             lst.Add(parsed);
                     }
@@ -415,7 +300,7 @@ namespace XamlX.Parsers
             Exception ParseError(IXamlLineInfo line, string message) =>
                 new XamlParseException(message, line.Line, line.Position);
 
-            public XamlAstObjectNode Parse() => (XamlAstObjectNode)ParseNewInstance(_root, _newRoot, true);
+            public XamlAstObjectNode Parse() => (XamlAstObjectNode)ParseNewInstance(_newRoot, true);
         }
     }
 
@@ -423,12 +308,6 @@ namespace XamlX.Parsers
     {
         class WrappedLineInfo : IXamlLineInfo
         {
-            public WrappedLineInfo(IXmlLineInfo info)
-            {
-                Line = info.LineNumber;
-                Position = info.LinePosition;
-            }
-
             public WrappedLineInfo(int line, int position)
             {
                 Line = line;
@@ -437,13 +316,6 @@ namespace XamlX.Parsers
 
             public int Line { get; set; }
             public int Position { get; set; }
-        }
-
-        public static IXamlLineInfo AsLi(this IXmlLineInfo info)
-        {
-            if (!info.HasLineInfo())
-                throw new InvalidOperationException("XElement doesn't have line info");
-            return new WrappedLineInfo(info);
         }
 
         public static IXamlLineInfo AsLi(this SyntaxNode info, string data)
